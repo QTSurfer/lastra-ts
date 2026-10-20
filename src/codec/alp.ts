@@ -46,6 +46,12 @@ export function decodeAlp(data: Uint8Array): Float64Array {
     const frameHi = view.getInt32(pos, false);
     const frameLo = view.getUint32(pos + 4, false);
     const frame = frameHi * 0x100000000 + frameLo;
+    // A double holds integers exactly up to 2^53. Every encoded value of this vector lies in
+    // [frame, frame + 2^bitWidth), so when that whole range fits, frame + delta is exact as a
+    // plain number. Otherwise (wide frame, or deltas of 53+ bits) the integer has to be
+    // assembled as a 64-bit BigInt, and rounded to a double once, like Java's (double) cast.
+    const wide = Math.abs(frame) + 2 ** bitWidth > Number.MAX_SAFE_INTEGER;
+    const frameBig = wide ? view.getBigInt64(pos, false) : 0n;
     pos += 8;
 
     const exceptionCount = view.getUint16(pos, false);
@@ -62,10 +68,18 @@ export function decodeAlp(data: Uint8Array): Float64Array {
     const factor10 = POW10[f];
     const exponent10 = POW10[e];
 
-    for (let i = 0; i < vectorSize; i++) {
-      const delta = readBits(packed, i * bitWidth, bitWidth);
-      const encoded = frame + delta;
-      result[offset + i] = (encoded * factor10) / exponent10;
+    if (wide) {
+      for (let i = 0; i < vectorSize; i++) {
+        const delta = readBitsBig(packed, i * bitWidth, bitWidth);
+        const encoded = Number(BigInt.asIntN(64, frameBig + delta));
+        result[offset + i] = (encoded * factor10) / exponent10;
+      }
+    } else {
+      for (let i = 0; i < vectorSize; i++) {
+        const delta = readBits(packed, i * bitWidth, bitWidth);
+        const encoded = frame + delta;
+        result[offset + i] = (encoded * factor10) / exponent10;
+      }
     }
 
     // Apply exceptions (BE format from Java)
@@ -83,7 +97,11 @@ export function decodeAlp(data: Uint8Array): Float64Array {
   return result;
 }
 
-function readBits(buf: Uint8Array, bitPos: number, bitWidth: number): number {
+/**
+ * Reads `bitWidth` (at most 32) bits, least significant bit first, as an unsigned 32-bit value.
+ * The bitwise operators work on 32 bits, so anything wider has to be read in pieces.
+ */
+function readBits32(buf: Uint8Array, bitPos: number, bitWidth: number): number {
   if (bitWidth === 0) return 0;
 
   let byteIdx = bitPos >> 3;
@@ -100,5 +118,21 @@ function readBits(buf: Uint8Array, bitPos: number, bitWidth: number): number {
     byteIdx++;
   }
 
-  return result;
+  return result >>> 0;
+}
+
+/** Reads up to 53 bits as a number, exact because the result stays below 2^53. */
+function readBits(buf: Uint8Array, bitPos: number, bitWidth: number): number {
+  if (bitWidth <= 32) return readBits32(buf, bitPos, bitWidth);
+  const low = readBits32(buf, bitPos, 32);
+  const high = readBits32(buf, bitPos + 32, bitWidth - 32);
+  return high * 0x100000000 + low;
+}
+
+/** Reads up to 64 bits as a BigInt. */
+function readBitsBig(buf: Uint8Array, bitPos: number, bitWidth: number): bigint {
+  if (bitWidth <= 32) return BigInt(readBits32(buf, bitPos, bitWidth));
+  const low = readBits32(buf, bitPos, 32);
+  const high = readBits32(buf, bitPos + 32, bitWidth - 32);
+  return (BigInt(high) << 32n) | BigInt(low);
 }
