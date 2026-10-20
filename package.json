@@ -1,6 +1,6 @@
 {
   "name": "@qtsurfer/lastra",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "TypeScript reader for the Lastra columnar time series format",
   "license": "Apache-2.0",
   "author": "QTSurfer (https://github.com/QTSurfer)",
